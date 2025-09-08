@@ -1,9 +1,11 @@
 # train_improved.py
 #
-# Updated training script for protein folding prediction.
+# Updated training script for protein folding prediction with plots.
 # - Uses pairwise distance loss (rotation/translation invariant)
 # - RMSD computed with Kabsch alignment
-# - Improved learning rate for faster convergence
+# - Learning rate scheduling
+# - Training/Validation loss + RMSD plots
+# - 3D structure visualization of predicted vs true coordinates
 #
 
 import os
@@ -15,13 +17,16 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.data import Batch
 from sklearn.model_selection import train_test_split
 import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import random
 
 # --- Configuration ---
 class Config:
     PROCESSED_GRAPH_DIR = "processed_graphs"
     PLOTS_DIR = "plots"
     BATCH_SIZE = 4
-    LEARNING_RATE = 1e-4   # higher than before
+    LEARNING_RATE = 1e-4
     EPOCHS = 300
     VALIDATION_SPLIT = 0.15
     N_LAYERS = 6
@@ -157,10 +162,6 @@ def pairwise_distance_loss(pred, true):
 
 
 def kabsch_rmsd(P, Q):
-    """
-    Compute RMSD between P and Q using the Kabsch algorithm.
-    P, Q: [N, 3] tensors
-    """
     P = P - P.mean(dim=0)
     Q = Q - Q.mean(dim=0)
     C = torch.matmul(P.T, Q)
@@ -187,6 +188,8 @@ def train():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
+    os.makedirs(Config.PLOTS_DIR, exist_ok=True)
+
     all_files = [f for f in os.listdir(Config.PROCESSED_GRAPH_DIR) if f.endswith('.pt')]
     train_files, val_files = train_test_split(all_files, test_size=Config.VALIDATION_SPLIT, random_state=42)
 
@@ -200,6 +203,8 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), weight_decay=Config.WEIGHT_DECAY)
 
     best_val_loss = float('inf')
+    history = {"train_loss": [], "val_loss": [], "train_rmsd": [], "val_rmsd": [], "lr": []}
+
     print("Starting training with improved loss + Kabsch RMSD...")
 
     for epoch in range(Config.EPOCHS):
@@ -244,12 +249,71 @@ def train():
             best_val_loss = avg_val_loss
             torch.save(model.state_dict(), 'best_model.pth')
 
+        # Save history
+        history["train_loss"].append(avg_train_loss)
+        history["val_loss"].append(avg_val_loss)
+        history["train_rmsd"].append(avg_train_rmsd)
+        history["val_rmsd"].append(avg_val_rmsd)
+        history["lr"].append(lr)
+
         print(f"Epoch {epoch+1}/{Config.EPOCHS}, LR={lr:.2e}")
         print(f"  Train: Loss {avg_train_loss:.4f}, RMSD {avg_train_rmsd:.2f} Å")
         print(f"  Val:   Loss {avg_val_loss:.4f}, RMSD {avg_val_rmsd:.2f} Å")
         print("-" * 50)
 
-    print("Training complete!")
+    print("Training complete! Saving plots...")
+
+    # --- PLOTS ---
+    plt.figure()
+    plt.plot(history["train_loss"], label="Train Loss")
+    plt.plot(history["val_loss"], label="Val Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Pairwise Distance Loss")
+    plt.legend()
+    plt.title("Training vs Validation Loss")
+    plt.savefig(os.path.join(Config.PLOTS_DIR, "loss_curve.png"))
+    plt.close()
+
+    plt.figure()
+    plt.plot(history["train_rmsd"], label="Train RMSD")
+    plt.plot(history["val_rmsd"], label="Val RMSD")
+    plt.xlabel("Epoch")
+    plt.ylabel("RMSD (Å)")
+    plt.legend()
+    plt.title("Training vs Validation RMSD")
+    plt.savefig(os.path.join(Config.PLOTS_DIR, "rmsd_curve.png"))
+    plt.close()
+
+    plt.figure()
+    plt.plot(history["lr"])
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.title("Learning Rate Schedule")
+    plt.savefig(os.path.join(Config.PLOTS_DIR, "lr_schedule.png"))
+    plt.close()
+
+    # --- 3D Structure Visualization ---
+    print("Generating 3D structure comparison plot...")
+    sample_data = random.choice(val_dataset)
+    sample_data = sample_data.to(device)
+    model.eval()
+    with torch.no_grad():
+        pred_coords = model(sample_data)
+    true_coords = sample_data.y.cpu().numpy()
+    pred_coords = pred_coords.cpu().numpy()
+
+    fig = plt.figure(figsize=(10, 5))
+
+    ax = fig.add_subplot(121, projection='3d')
+    ax.plot(true_coords[:, 0], true_coords[:, 1], true_coords[:, 2], c='blue', marker='o')
+    ax.set_title("True Structure")
+
+    ax = fig.add_subplot(122, projection='3d')
+    ax.plot(pred_coords[:, 0], pred_coords[:, 1], pred_coords[:, 2], c='red', marker='o')
+    ax.set_title("Predicted Structure")
+
+    plt.savefig(os.path.join(Config.PLOTS_DIR, "structure_comparison.png"))
+    plt.close()
 
 
 if __name__ == "__main__":
